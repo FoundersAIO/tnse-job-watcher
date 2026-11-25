@@ -13,6 +13,7 @@ Variables (same page, "Variables" tab), optional:
 """
 
 import hashlib
+import re
 import json
 import os
 import sys
@@ -39,8 +40,12 @@ def log(msg):
     print(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC] {msg}", flush=True)
 
 
+def norm(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def clean_lines(text):
-    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return [norm(ln) for ln in text.splitlines() if ln.strip()]
 
 
 def extract_section(html, watch_all=False):
@@ -62,7 +67,7 @@ def extract_section(html, watch_all=False):
     if not heading:
         return None, []
 
-    parts, links = [heading.get_text(" ", strip=True)], set()
+    parts, links = [norm(heading.get_text(" ", strip=True))], set()
     for el in heading.find_all_next():
         if el.name in ("h1", "h2", "h3", "h4"):
             t = el.get_text(" ", strip=True).lower()
@@ -72,7 +77,7 @@ def extract_section(html, watch_all=False):
             links.add(el["href"])
         if el.name in ("p", "li", "h3", "h4", "h5", "h6", "a", "span") and not el.find(
                 ["p", "li", "div"]):
-            t = el.get_text(" ", strip=True)
+            t = norm(el.get_text(" ", strip=True))
             if t and t not in parts:
                 parts.append(t)
     return "\n".join(parts), sorted(links)
