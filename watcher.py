@@ -16,6 +16,7 @@ import re
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,8 +101,8 @@ def main():
         log("First run. Saved the current page as the baseline:\n" + "\n".join(lines))
     elif prev["hash"] != digest:
         old_lines, old_links = prev["lines"], prev.get("links", [])
-        added = [l for l in lines if l not in old_lines]
-        removed = [l for l in old_lines if l not in lines]
+        added = list((Counter(lines) - Counter(old_lines)).elements())
+        removed = list((Counter(old_lines) - Counter(lines)).elements())
         new_links = [l for l in links if l not in old_links]
         gone_links = [l for l in old_links if l not in links]
 
