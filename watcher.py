@@ -1,15 +1,14 @@
 """
 TNSE Job Watcher (GitHub Actions version)
-Checks https://www.tnse.com/join-our-team/ and sends a Discord alert when the
-"Full-Time Employment Opportunities" section changes.
+Checks https://www.tnse.com/join-our-team/ and sends a Discord alert whenever
+the page's content changes (any section, any wording, any link), showing what
+was added and removed.
 
 Runs on a schedule via .github/workflows/watch.yml. The last-seen version of
 the page is kept in state.json, which the workflow commits back to the repo.
 
 Secrets (repo Settings > Secrets and variables > Actions):
     DISCORD_WEBHOOK   required, Discord webhook URL for alerts
-Variables (same page, "Variables" tab), optional:
-    WATCH_ALL         set to "true" to watch every section, not just full-time
 """
 
 import hashlib
@@ -24,11 +23,9 @@ import requests
 from bs4 import BeautifulSoup
 
 URL = "https://www.tnse.com/join-our-team/"
-SECTION_HEADING = "Full-Time Employment Opportunities"
-NEXT_SECTION_HINTS = ("casual employment", "hargrave", "student placement")
+FT_EMPTY = "no full-time employment opportunities"
 STATE_FILE = Path(__file__).with_name("state.json")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "").strip()
-WATCH_ALL = os.environ.get("WATCH_ALL", "").strip().lower() == "true"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -48,39 +45,21 @@ def clean_lines(text):
     return [norm(ln) for ln in text.splitlines() if ln.strip()]
 
 
-def extract_section(html, watch_all=False):
+def extract_page(html):
+    """All meaningful content on the page as normalized lines, plus its links.
+    Site-wide header/footer/nav and scripts are dropped so only real page changes count."""
     soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
+    for tag in soup(["script", "style", "noscript", "header", "footer", "nav",
+                     "iframe", "svg"]):
         tag.decompose()
-
-    if watch_all:
-        anchor = soup.find(lambda t: t.name in ("h1", "h2", "h3")
-                           and "join our team" in t.get_text(" ", strip=True).lower())
-        root = anchor.find_parent(["main", "article", "section", "div"]) if anchor else None
-        root = root or soup.body or soup
-        text = "\n".join(clean_lines(root.get_text("\n")))
-        links = sorted({a["href"] for a in root.find_all("a", href=True)})
-        return text, links
-
-    heading = soup.find(lambda t: t.name in ("h1", "h2", "h3", "h4", "h5", "strong", "p")
-                        and SECTION_HEADING.lower() in t.get_text(" ", strip=True).lower())
-    if not heading:
-        return None, []
-
-    parts, links = [norm(heading.get_text(" ", strip=True))], set()
-    for el in heading.find_all_next():
-        if el.name in ("h1", "h2", "h3", "h4"):
-            t = el.get_text(" ", strip=True).lower()
-            if any(h in t for h in NEXT_SECTION_HINTS):
-                break
-        if el.name == "a" and el.get("href"):
-            links.add(el["href"])
-        if el.name in ("p", "li", "h3", "h4", "h5", "h6", "a", "span") and not el.find(
-                ["p", "li", "div"]):
-            t = norm(el.get_text(" ", strip=True))
-            if t and t not in parts:
-                parts.append(t)
-    return "\n".join(parts), sorted(links)
+    root = soup.find("main") or soup.find(id="content") or soup.body or soup
+    lines = []
+    for ln in clean_lines(root.get_text("\n")):
+        if not lines or lines[-1] != ln:
+            lines.append(ln)
+    links = sorted({a["href"].strip() for a in root.find_all("a", href=True)
+                    if a["href"].strip() and not a["href"].startswith(("#", "javascript:"))})
+    return lines, links
 
 
 def notify(title, body):
@@ -108,37 +87,46 @@ def main():
         log(f"Couldn't load page: {e}")
         return
 
-    text, links = extract_section(r.text, WATCH_ALL)
-    state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
-    key = "all" if WATCH_ALL else "full_time"
-
-    if text is None:
-        if not state.get("missing_alerted"):
-            notify("TNSE Watcher: section not found",
-                   f"Couldn't find '{SECTION_HEADING}' on the page. The layout may have changed. Check it manually.")
-            state["missing_alerted"] = True
-            STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
+    lines, links = extract_page(r.text)
+    if len(lines) < 5:
+        log("Page came back nearly empty (likely a blip or bot check), so this run is skipped.")
         return
-    state.pop("missing_alerted", None)
 
-    digest = hashlib.sha256((text + "\n".join(links)).encode()).hexdigest()
-    prev = state.get(key)
+    state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+    digest = hashlib.sha256(("\n".join(lines) + "\n" + "\n".join(links)).encode()).hexdigest()
+    prev = state.get("page")
 
     if prev is None:
-        log("First run. Saved the current version as the baseline:\n" + text)
+        log("First run. Saved the current page as the baseline:\n" + "\n".join(lines))
     elif prev["hash"] != digest:
-        still_empty = "no full-time employment opportunities" in text.lower()
-        title = ("🚨 TNSE full-time job posted!" if not WATCH_ALL and not still_empty
-                 else "🚨 TNSE careers page changed")
-        new_links = [l for l in links if l not in prev.get("links", [])]
-        body = text + ("\n\nNew links:\n" + "\n".join(new_links) if new_links else "")
-        notify(title, body)
+        old_lines, old_links = prev["lines"], prev.get("links", [])
+        added = [l for l in lines if l not in old_lines]
+        removed = [l for l in old_lines if l not in lines]
+        new_links = [l for l in links if l not in old_links]
+        gone_links = [l for l in old_links if l not in links]
+
+        ft_gone = (any(FT_EMPTY in l.lower() for l in old_lines)
+                   and not any(FT_EMPTY in l.lower() for l in lines))
+        title = "🚨 TNSE: full-time openings may be posted!" if ft_gone else "🔔 TNSE careers page changed"
+
+        body = []
+        if added:
+            body.append("**Added:**\n" + "\n".join(f"+ {l}" for l in added))
+        if removed:
+            body.append("**Removed:**\n" + "\n".join(f"- {l}" for l in removed))
+        if new_links:
+            body.append("**New links:**\n" + "\n".join(f"<{l}>" for l in new_links))
+        if gone_links:
+            body.append("**Links removed:**\n" + "\n".join(f"<{l}>" for l in gone_links))
+        if not body:
+            body.append("Content was reordered (nothing added or removed).")
+        notify(title, "\n\n".join(body))
     else:
         log("No change.")
         return
 
     # No timestamps in here, so the file (and a commit) only changes when the page does.
-    state[key] = {"hash": digest, "text": text, "links": links}
+    state = {"page": {"hash": digest, "lines": lines, "links": links}}
     STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
 
 

@@ -2,7 +2,7 @@ name: Watch TNSE jobs
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may delay runs a few minutes)
+    - cron: "*/5 * * * *"    # every 5 min, the fastest GitHub allows (runs can still lag at busy times)
   workflow_dispatch:          # lets you run it by hand from the Actions tab
     inputs:
       test_alert:
@@ -34,7 +34,6 @@ jobs:
       - name: Check the page
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          WATCH_ALL: ${{ vars.WATCH_ALL }}
         run: |
           if [ "${{ inputs.test_alert }}" = "true" ]; then
             python watcher.py --test-alert
